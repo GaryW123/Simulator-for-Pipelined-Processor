@@ -1,0 +1,1237 @@
+#/* On my honor, I have neither given nor received unauthorized aid on this assignment */
+import numpy as np
+import re
+file_handle = open('simulation.txt', mode='w')
+file_dissembly= open('disassembly.txt', mode='w')
+#Register R00~R24
+Cycle=0
+Reg=np.zeros(32,int)
+Imm=[]#用来存立即数
+ImmAddr=[]
+instr=[]#用来存指令，原码
+DataAddr=0 #记录数据区开头地址
+Data=None #Data
+PC=256#PC
+InsCat1=['J','JR','BEQ','BLTZ','BGTZ','BREAK','SW','LW','SLL','SRL','SRA','NOP']
+InsCat2=['ADD','SUB','MUL','AND','OR','XOR','NOR','SLT','ADDI','ANDI','ORI','XORI']
+RegStateUpdate=list()
+#记录pre issue entry 的空槽数
+pre_issue_count=0
+# IF Unit:
+waiting_ins = ""
+executed_ins = ""
+# pre-issue queue:长度为4
+pre_issue_Entry = list()
+# pre-ALU1 Queue:长度为2
+pre_alu1_Entry = list()
+# pre-MEM Queue:
+pre_mem_ins = ""
+# post-MEM Queue:
+post_mem_ins = ""
+# pre-ALU2 Queue:长度为2
+pre_alu2_Entry = list()
+# Post-ALU2 Queue:
+post_alu2_ins = ""
+BreakFlag=False
+def printReg():
+#    print("Registers")
+    file_handle.write("\nRegisters\n")
+    for i in range(len(Reg)):
+        if i==0:
+      #      print("R00:\t{}".format(Reg[i]),end='')
+            file_handle.write("R00:\t{}".format(Reg[i]))
+        elif i==8:
+        #    print("\nR08:\t{}".format(Reg[i]),end='')
+            file_handle.write("\nR08:\t{}".format(Reg[i]))
+        elif i==16:
+         #   print("\nR16:\t{}".format(Reg[i]),end='')
+            file_handle.write("\nR16:\t{}".format(Reg[i]))
+        elif i==24:
+        #    print("\nR24:\t{}".format(Reg[i]),end='')
+            file_handle.write("\nR24:\t{}".format(Reg[i]))
+        else:
+        #    print("\t{}".format(Reg[i]),end='')
+            file_handle.write("\t{}".format(Reg[i]))
+ #   print('\n')
+    file_handle.write('\n')
+    return
+def printData():
+ #   print("\nData",end='')
+    file_handle.write("\nData")
+    for i in range(len(Imm)):
+        if (ImmAddr[i]-DataAddr)%32==0:#8个为1组
+   #         print("\n{}:\t{}".format(ImmAddr[i],Imm[i]),end='')
+            file_handle.write("\n{}:\t{}".format(ImmAddr[i],Imm[i]))
+        else:
+     #       print("\t{}".format(Imm[i]),end='')
+            file_handle.write("\t{}".format(Imm[i]))
+#    print('\n')
+    file_handle.write('\n')
+
+#补码str转原码str
+def com2ori(ori_str):
+    # 如果符号位为正，则原码与补码相同
+    if ori_str[0] == '0':
+        return ori_str
+    elif ori_str[0] == '1':#负数 取反加一
+        value_str = ""
+        # 数值位按位取反
+        for i in range(len(ori_str)):
+            value_str+='1' if ori_str[i] == '0' else '0'
+        # 数值位加 1
+        n = int(value_str, 2) + 1
+        com_str = bin(n)[2:]
+        if len(com_str) >= len(ori_str):
+            # 说明进位到符号位了
+            com_str = '0' + com_str[1:]
+        else:
+            # 0不够，中间填充0
+            n = len(ori_str) - len(com_str) - 1
+            for i in range(n):
+                com_str = '0' + com_str
+            com_str = '1' + com_str
+        return com_str
+
+#原码str转十进制int
+def ori2dec(bin_str):
+    # 如果为正数
+    if bin_str[0] == '0':
+        return int(bin_str, 2)
+    elif bin_str[0] == '1':
+        return -int(bin_str[1:], 2)
+#补码str转十进制int
+def com2dec(com_str):
+    ori_str = com2ori(com_str)
+    return ori2dec(ori_str)
+#十进制转二进制原码
+def dec2ori(dec_num):
+    bin_tmp=bin(dec_num)
+    if bin_tmp[0] == '-':  # 为负数 符号位置1
+        bin_tmp = '1' + bin_tmp[3:]
+    else:  # 为正数 符号位置0
+        bin_tmp = '0' + bin_tmp[2:]
+    return bin_tmp
+#位数补齐32位(保留符号）
+def converTo32bit(bin_str):
+    if len(bin_str)<32:
+        bin_str=bin_str[0]+(32-len(bin_str))*'0'+bin_str[1:]#补齐
+    return bin_str
+
+
+#逻辑左移
+def SLL(dec_num,b):
+    bin_num=0
+    if dec_num==-4294967296:
+        bin_num="10000000000000000000000000000000"
+    else:
+        bin_num=dec2ori(dec_num)
+        bin_num = converTo32bit(bin_num)
+        bin_num=com2ori(bin_num)
+    tmp=bin_num+b*'0'
+    bin_num=tmp[b:]
+
+    return ori2dec(bin_num)
+
+#逻辑右移
+def SRL(dec_num,b):
+    if dec_num==-4294967296:
+        bin_num="10000000000000000000000000000000"
+    else:
+        bin_num = bin(dec_num)
+        if bin_num[0] == '-':
+            bin_num = '1' + bin_num[3:]
+        else:
+            bin_num = bin_num[2:]
+        bin_num = converTo32bit(bin_num)
+        bin_num=com2ori(bin_num)
+    tmp=b*'0'+bin_num
+    bin_num=tmp[0:32]
+    return ori2dec(bin_num)
+#算数右移
+def SRA(dec_num,b):
+    if dec_num==-2147483648:
+        bin_num="10000000000000000000000000000000"
+    else:
+        bin_num = bin(dec_num)
+        if bin_num[0] == '-':
+            bin_num = '1' + bin_num[3:]
+        else:
+            bin_num = bin_num[2:]
+        bin_num = converTo32bit(bin_num)
+        bin_num=com2ori(bin_num)
+    sign=bin_num[0]
+    tmp=b*'0'+bin_num
+    bin_num=sign+tmp[1:32]
+    return ori2dec(bin_num)
+
+
+
+
+#反汇编J
+def act_J(instr):
+    global PC
+    instr_index = instr[6:] #取后26位
+    instr_index += '00' #左移两位
+    PC_up4 = bin(0x0F0000000 & PC)
+    PC_up4 = PC_up4[2:6]#取PC前四位
+    if len(PC_up4) < 4:#补齐
+        cont = 4 - len(PC_up4)
+        PC_up4 = cont * '0' + PC_up4
+    PC = PC_up4 + instr_index#合成32位地址
+    PC=int(PC,2)
+    disassemble_ins='J'+' '+'#'+str(PC)
+    return disassemble_ins
+#反汇编JR
+def act_JR(instr):
+    global PC
+    rs_id=int(instr[6:11],2)
+    PC=Reg[rs_id]
+    disassemble_ins='JR'+' '+'R'+str(PC)
+    return  disassemble_ins
+#BEQ 比较两个寄存器的值是否相等，相等则跳转
+def act_BEQ(instr):
+    global PC
+    rs_id=int(instr[6:11],2)
+    rt_id=int(instr[11:16],2)
+    offset = instr[16:32]
+    offset+='00'
+    offset=int(offset,2)
+    if Reg[rs_id]==Reg[rt_id]:#如果相等
+        PC+=offset
+    PC+=4
+    disassemble_ins='BEQ'+' '+'R'+str(rs_id)+', R'+str(rt_id)+', #'+str(offset)
+    return disassemble_ins
+def act_BLTZ(instr):
+    global PC
+    rs_id = int(instr[6:11], 2)
+    offset = int(instr[16:32]+"00",2)
+    if Reg[rs_id]<0:  # 如果小于0
+        PC += offset
+    PC += 4
+    disassemble_ins = 'BLTZ' + ' ' + 'R' + str(rs_id) + ', ' + '#' + str(offset)
+    return disassemble_ins
+
+def act_BGTZ(instr):
+    global PC
+    rs_id = int(instr[6:11], 2)
+    offset=int(instr[16:32]+'00',2)
+    if Reg[rs_id] > 0:  # 如果小于0
+        PC += offset
+    PC += 4
+    disassemble_ins = 'BGTZ' + ' ' + 'R' + str(rs_id) + ', ' + '#' + str(offset)
+    return disassemble_ins
+def act_BREAK(instr):
+    global BreakFlag
+    BreakFlag = True
+    return "BREAK"
+def act_SW(instr):
+    base_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    offset = int(instr[16:32], 2)
+    memoryAddr=Reg[base_id]+offset
+    Imm_id=int((memoryAddr-DataAddr)/4)
+    Imm[Imm_id]=Reg[rt_id]
+    disassemble_ins = 'SW' + ' ' + 'R' + str(rt_id) + ', ' + str(offset) + '(R' + str(base_id)+')'
+    return disassemble_ins
+def act_LW(instr):
+    base_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    offset = int(instr[16:32], 2)
+    memoryAddr = Reg[base_id] + offset
+    Imm_id = int((memoryAddr - DataAddr) / 4)
+    Reg[rt_id]=Imm[Imm_id]
+    disassemble_ins = 'LW' + ' ' + 'R' + str(rt_id) + ', ' + str(offset) + '(R' + str(base_id) + ')'
+    return disassemble_ins
+def act_SLL(instr):
+    rt_id = int(instr[11:16], 2)
+    rd_id = int(instr[16:21], 2)
+    sa = int(instr[21:26], 2)
+    tmp=Reg[rt_id]
+    Reg[rd_id]=SLL(tmp,sa)
+    disassemble_ins = 'SLL' + ' ' + 'R' + str(rd_id) + ', ' + 'R' + str(rt_id) + ', '+'#'+str(sa)
+    return disassemble_ins
+def act_SRL(instr):
+    rt_id = int(instr[11:16], 2)
+    rd_id = int(instr[16:21], 2)
+    sa = int(instr[21:26], 2)
+    tmp = Reg[rt_id]
+    Reg[rd_id] = SRL(tmp, sa)
+    disassemble_ins = 'SRL' + ' ' + 'R' + str(rd_id) + ', ' + 'R' + str(rt_id) + ', ' + '#' + str(sa)
+    return disassemble_ins
+def act_SRA(instr):
+    rt_id = int(instr[11:16], 2)
+    rd_id = int(instr[16:21], 2)
+    sa = int(instr[21:26], 2)
+    tmp = Reg[rt_id]
+    Reg[rd_id] = SRA(tmp, sa)
+    disassemble_ins = 'SRA' + ' ' + 'R' + str(rd_id) + ', ' + 'R' + str(rt_id) + ', ' + '#' + str(sa)
+    return disassemble_ins
+def act_NOP(instr):
+    return 'NOP'
+
+def act_ADD(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    rd_id = int(instr[16:21], 2)
+    tmp= Reg[rs_id]+Reg[rt_id]
+    disassemble_ins='ADD'+' R'+str(rd_id)+', R'+str(rs_id)+', R'+str(rt_id)
+    if (tmp>pow(2,31)-1)or(tmp<-pow(2,31)):
+        return disassemble_ins
+    else:
+        Reg[rd_id]=tmp
+    return disassemble_ins
+def act_SUB(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    rd_id = int(instr[16:21], 2)
+    tmp = Reg[rs_id] - Reg[rt_id]
+    disassemble_ins = 'SUB' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+    if (tmp > pow(2, 31) - 1) or(tmp < -pow(2, 31)):
+        return disassemble_ins
+    else:
+        Reg[rd_id] = tmp
+    return disassemble_ins
+def act_MUL(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    rd_id = int(instr[16:21], 2)
+    tmp = Reg[rs_id]*Reg[rt_id]
+    disassemble_ins = 'MUL' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+    if (tmp <= pow(2, 31) - 1) and (tmp >= -pow(2, 31)): #在范围内
+       Reg[rd_id]=tmp
+    else:#不是32位，需要截断
+        bin_tmp = bin(tmp)
+        if bin_tmp[0] == '-':#为负数 符号位置1
+            bin_tmp = '1' + bin_tmp[3:]
+        else:#为正数 符号位置0
+            bin_tmp = '0'+bin_tmp[2:]
+        bin_tmp = com2ori(bin_tmp)#转为补码
+        bin_tmp = bin_tmp[len(bin_tmp) - 32:len(bin_tmp)]#截断后32位
+        tmp = com2dec(bin_tmp)#转为十进制
+        Reg[rd_id] = tmp#赋值给寄存器
+    return disassemble_ins
+def act_AND(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    rd_id=int(instr[16:21],2)
+    Reg[rd_id]=Reg[rs_id]&Reg[rt_id]
+    disassemble_ins='AND'+' R'+str(rd_id)+', R'+str(rs_id)+', R'+str(rt_id)
+    return disassemble_ins
+def act_OR(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    rd_id = int(instr[16:21], 2)
+    Reg[rd_id] = Reg[rs_id] | Reg[rt_id]
+    disassemble_ins = 'OR' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+    return disassemble_ins
+def act_XOR(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    rd_id = int(instr[16:21], 2)
+    Reg[rd_id] = Reg[rs_id] ^ Reg[rt_id]
+    disassemble_ins = 'XOR' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+    return disassemble_ins
+def act_NOR(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    rd_id = int(instr[16:21], 2)
+    tmp_rs=Reg[rs_id]
+    tmp_rt=Reg[rt_id]
+    tmp_ans=""
+    if tmp_rs==-pow(2,31):#如果rs为最小值
+        tmp_rs="10000000000000000000000000000000"
+    elif tmp_rt==-pow(2,31):#如果rt为最小值
+        tmp_rt="10000000000000000000000000000000"
+    else:
+        tmp_rs=dec2ori(tmp_rs)#转二进制原码
+        tmp_rt = dec2ori(tmp_rt)  # 转二进制原码
+        tmp_rs=converTo32bit(tmp_rs)#32位对齐
+        tmp_rt = converTo32bit(tmp_rt)  # 32位对齐
+    for i in range(0,32):
+        if not(tmp_rs[i]|tmp_rt[i]):#或非，如果都为0，那么为1
+            tmp_ans+='1'
+        else:
+            tmp_ans+='0'
+    if tmp_ans=="10000000000000000000000000000000":#结果如果为最小值
+        Reg[rd_id] = -pow(2,31)
+    else:
+        Reg[rd_id]=com2dec(tmp_ans)
+    disassemble_ins = 'NOR' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+    return disassemble_ins
+def act_SLT(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    rd_id = int(instr[16:21], 2)
+    Reg[rd_id]=1 if Reg[rs_id]<Reg[rt_id] else 0
+    disassemble_ins = 'SLT' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+    return disassemble_ins
+def act_ADDI(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    tmp_imm = instr[16:32]
+    tmp_imm=converTo32bit(tmp_imm)#转为32位
+    tmp_imm=ori2dec(tmp_imm)#转为10进制
+    tmp_rt=Reg[rs_id]+tmp_imm
+    if tmp_rt>-pow(2,31) and tmp_rt<pow(2,31)-1:
+        Reg[rt_id] = tmp_rt
+    disassemble_ins = 'ADDI' +  ' R' + str(rt_id) + ', R' + str(rs_id)+ ', #'+str(tmp_imm)
+    return disassemble_ins
+def act_ANDI(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    tmp_imm = 16*'0'+instr[16:32]
+    Reg[rt_id]=Reg[rs_id]&int(tmp_imm,2)
+    disassemble_ins = 'ANDI' + ' R' + str(rs_id) + ', R' + str(rt_id) + ', #' + str(tmp_imm)
+    return disassemble_ins
+def act_ORI(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    tmp_imm = 16 * '0' + instr[16:32]
+    Reg[rt_id] = Reg[rs_id] | int(tmp_imm, 2)
+    disassemble_ins = 'ORI' + ' R' + str(rs_id) + ', R' + str(rt_id) + ', #' + str(tmp_imm)
+    return disassemble_ins
+def act_XORI(instr):
+    rs_id = int(instr[6:11], 2)
+    rt_id = int(instr[11:16], 2)
+    tmp_imm = 16 * '0' + instr[16:32]
+    Reg[rt_id] = Reg[rs_id] ^ int(tmp_imm, 2)
+    disassemble_ins = 'XORI' + ' R' + str(rs_id) + ', R' + str(rt_id) + ', #' + str(tmp_imm)
+    return disassemble_ins
+
+
+class instruction:
+#初始化
+    def __init__(self,instr):
+        self.insAddr=PC
+        self.instr=instr
+        self.inType=instr[0:2]
+        self.Category = 1 if self.inType == '01' else 2
+        self.opBin=instr[2:6]
+        self.opDec=int(self.opBin,2)
+        self.opName = InsCat1[self.opDec] if self.Category == 1 else InsCat2[self.opDec]
+        self.disassemble_ins = ""
+        #存寄存器
+        self.rd = None
+        self.rs = None
+        self.rt = None
+        #存是否SW LW类型的判断
+        self.ifLWSW=1 if (self.opName=="LW" or self.opName=="SW") else 2
+        self.disassemble()
+
+#输出
+    def display(self):
+        print(self.instr,self.insAddr,self.disassemble_ins)
+    def getInfo(self):
+        return(self.instr+'\t'+str(self.insAddr)+'\t'+self.disassemble_ins+'\n')
+
+
+# 反汇编J
+    def disassemble_J(self):
+        instr_index = self.instr[6:]  # 取后26位
+        instr_index += '00'  # 左移两位
+        PC_up4 = bin(0x0F0000000 & self.insAddr)
+        PC_up4 = PC_up4[2:6]  # 取PC前四位
+        if len(PC_up4) < 4:  # 补齐
+           cont = 4 - len(PC_up4)
+           PC_up4 = cont * '0' + PC_up4
+        instr_Addr = PC_up4 + instr_index  # 合成32位地址
+        instr_Addr = int(instr_Addr, 2)
+        self.disassemble_ins = 'J' + ' ' + '#' + str(instr_Addr)
+
+    # 反汇编JR
+    def disassemble_JR(self):
+        rs_id = int(self.instr[6:11], 2)
+        self.disassemble_ins = 'JR' + ' ' + 'R' + str(Reg[rs_id])
+        self.rs=rs_id
+
+# BEQ 比较两个寄存器的值是否相等，相等则跳转
+    def disassemble_BEQ(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        offset = self.instr[16:32]
+        offset += '00'
+        offset = int(offset, 2)
+        self.disassemble_ins = 'BEQ' + ' ' + 'R' + str(rs_id) + ', R' + str(rt_id) + ', #' + str(offset)
+        self.rs=rs_id
+        self.rt=rt_id
+
+
+    def disassemble_BLTZ(self):
+        rs_id = int(self.instr[6:11], 2)
+        offset = int(self.instr[16:32] + "00", 2)
+        self.disassemble_ins = 'BLTZ' + ' ' + 'R' + str(rs_id) + ', ' + '#' + str(offset)
+        self.rs = rs_id
+
+
+    def disassemble_BGTZ(self):
+        rs_id = int(self.instr[6:11], 2)
+        offset = int(self.instr[16:32] + '00', 2)
+        self.disassemble_ins = 'BGTZ' + ' ' + 'R' + str(rs_id) + ', ' + '#' + str(offset)
+        self.rs = rs_id
+
+
+    def disassemble_BREAK(self):
+        self.disassemble_ins ="BREAK"
+
+        return "BREAK"
+
+
+    def disassemble_SW(self):
+        base_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        offset = int(self.instr[16:32], 2)
+        self.disassemble_ins = 'SW' + ' ' + 'R' + str(rt_id) + ', ' + str(offset) + '(R' + str(base_id) + ')'
+        self.rd = rt_id
+        self.rs=base_id
+
+
+
+    def disassemble_LW(self):
+        base_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        offset = int(self.instr[16:32], 2)
+        self.disassemble_ins = 'LW' + ' ' + 'R' + str(rt_id) + ', ' + str(offset) + '(R' + str(base_id) + ')'
+        self.rd = rt_id
+        self.rs=base_id
+
+    def disassemble_SLL(self):
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        sa = int(self.instr[21:26], 2)
+        self.disassemble_ins = 'SLL' + ' ' + 'R' + str(rd_id) + ', ' + 'R' + str(rt_id) + ', ' + '#' + str(sa)
+        self.rd = rd_id
+        self.rt = rt_id
+
+    def disassemble_SRL(self):
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        sa = int(self.instr[21:26], 2)
+        self.disassemble_ins = 'SRL' + ' ' + 'R' + str(rd_id) + ', ' + 'R' + str(rt_id) + ', ' + '#' + str(sa)
+        self.rd = rd_id
+        self.rt = rt_id
+
+    def disassemble_SRA(self):
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        sa = int(self.instr[21:26], 2)
+        self.disassemble_ins = 'SRA' + ' ' + 'R' + str(rd_id) + ', ' + 'R' + str(rt_id) + ', ' + '#' + str(sa)
+        self.rd = rd_id
+        self.rt = rt_id
+
+    def disassemble_NOP(self):
+        return 'NOP'
+
+
+    def disassemble_ADD(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        self.disassemble_ins = 'ADD' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+        self.rd = rd_id
+        self.rt = rt_id
+        self.rs = rs_id
+
+    def disassemble_SUB(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        self.disassemble_ins = 'SUB' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+        self.rd = rd_id
+        self.rt = rt_id
+        self.rs = rs_id
+
+    def disassemble_MUL(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        self.disassemble_ins = 'MUL' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+        self.rd = rd_id
+        self.rt = rt_id
+        self.rs = rs_id
+
+    def disassemble_AND(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        self.disassemble_ins = 'AND' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+        self.rd = rd_id
+        self.rt = rt_id
+        self.rs = rs_id
+
+    def disassemble_OR(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        self.disassemble_ins = 'OR' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+        self.rd = rd_id
+        self.rt = rt_id
+        self.rs = rs_id
+
+
+    def disassemble_XOR(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        self.disassemble_ins = 'XOR' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+        self.rd = rd_id
+        self.rt = rt_id
+        self.rs = rs_id
+
+    def disassemble_NOR(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        self.disassemble_ins = 'NOR' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+        self.rd = rd_id
+        self.rt = rt_id
+        self.rs = rs_id
+
+    def disassemble_SLT(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        rd_id = int(self.instr[16:21], 2)
+        self.disassemble_ins = 'SLT' + ' R' + str(rd_id) + ', R' + str(rs_id) + ', R' + str(rt_id)
+        self.rd = rd_id
+        self.rt = rt_id
+        self.rs = rs_id
+
+    def disassemble_ADDI(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        tmp_imm = self.instr[16:32]
+        tmp_imm = converTo32bit(tmp_imm)  # 转为32位
+        tmp_imm = ori2dec(tmp_imm)  # 转为10进制
+        self.disassemble_ins = 'ADDI' + ' R' + str(rt_id) + ', R' + str(rs_id) + ', #' + str(tmp_imm)
+        self.rd = rt_id
+        self.rs = rs_id
+
+
+    def disassemble_ANDI(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        tmp_imm = int(16 * '0' + self.instr[16:32], 2)
+        self.disassemble_ins = 'ANDI' + ' R' + str(rs_id) + ', R' + str(rt_id) + ', #' + str(tmp_imm)
+        self.rd = rt_id
+        self.rs = rs_id
+
+    def disassemble_ORI(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        tmp_imm = int(16 * '0' + self.instr[16:32], 2)
+        self.disassemble_ins = 'ORI' + ' R' + str(rs_id) + ', R' + str(rt_id) + ', #' + str(tmp_imm)
+        self.rd = rt_id
+        self.rs = rs_id
+
+    def disassemble_XORI(self):
+        rs_id = int(self.instr[6:11], 2)
+        rt_id = int(self.instr[11:16], 2)
+        tmp_imm = int(16 * '0' + self.instr[16:32], 2)
+        self.disassemble_ins = 'XORI' + ' R' + str(rs_id) + ', R' + str(rt_id) + ', #' + str(tmp_imm)
+        self.rd = rt_id
+        self.rs = rs_id
+
+    def disassemble(self):
+        if self.Category==1: #第一种指令
+            if self.opName==InsCat1[0]: # J 跳转指令
+                self.disassemble_J()
+            elif self.opName==InsCat1[1]: # JR 跳转到寄存器中的地址指令
+                self.disassemble_JR()
+            elif self.opName==InsCat1[2]:#'BEQ','BLTZ'
+                self.disassemble_BEQ()
+            elif self.opName==InsCat1[3]:#'BLTZ'
+                self.disassemble_BLTZ()
+            elif self.opName == InsCat1[4]:  # 'BGTZ'
+                self.disassemble_BGTZ()
+            elif self.opName == InsCat1[5]:  # BREAK
+                self.disassemble_BREAK()
+            elif self.opName == InsCat1[6]:  # SW
+                self.disassemble_SW()
+            elif self.opName == InsCat1[7]:  # LW
+                self.disassemble_LW()
+            elif self.opName == InsCat1[8]:  # SLL
+                self.disassemble_SLL()
+            elif self.opName == InsCat1[9]:  # SRL
+                self.disassemble_SRL()
+            elif self.opName == InsCat1[10]:  # SRA
+                self.disassemble_SRA()
+            elif self.opName == InsCat1[11]:  # NOP
+                self.disassemble_NOP()
+        else:
+            if self.opName == InsCat2[0]:  # ADD
+                self.disassemble_ADD()
+            elif self.opName == InsCat2[1]:  # SUB 跳转到寄存器中的地址指令
+                self.disassemble_SUB()
+            elif self.opName == InsCat2[2]:  # 'MUL
+                self.disassemble_MUL()
+            elif self.opName == InsCat2[3]:  # 'AND
+                self.disassemble_AND()
+            elif self.opName == InsCat2[4]:  # 'OR
+                self.disassemble_OR()
+            elif self.opName == InsCat2[5]:  # XOR
+                self.disassemble_XOR()
+            elif self.opName == InsCat2[6]:  # NOR
+                self.disassemble_NOR()
+            elif self.opName == InsCat2[7]:  # SLT
+                self.disassemble_SLT()
+            elif self.opName == InsCat2[8]:  # ADDI
+                self.disassemble_ADDI()
+            elif self.opName == InsCat2[9]:  # ANDI
+                self.disassemble_ANDI()
+            elif self.opName == InsCat2[10]:  # ORI
+                self.disassemble_ORI()
+            elif self.opName == InsCat2[11]:  # XORI
+                self.disassemble_XORI()
+
+        file_dissembly.write("{}\t{}\t{}\n".format(self.instr,self.insAddr,self.disassemble_ins))
+   #     print("{}\t{}\t{}\n".format(self.instr,self.insAddr,self.disassemble_ins))
+
+    def actInstr(self):
+        if self.Category == 1:  # 第一种指令
+            if self.opName == InsCat1[0]:  # J 跳转指令
+                self.disassemble_ins = act_J(self.instr)
+            elif self.opName == InsCat1[1]:  # JR 跳转到寄存器中的地址指令
+                self.disassemble_ins = act_JR(self.instr)
+            elif self.opName == InsCat1[2]:  # 'BEQ','BLTZ'
+                self.disassemble_ins = act_BEQ(self.instr)
+            elif self.opName == InsCat1[3]:  # 'BLTZ'
+                self.disassemble_ins = act_BLTZ(self.instr)
+            elif self.opName == InsCat1[4]:  # 'BGTZ'
+                self.disassemble_ins = act_BGTZ(self.instr)
+            elif self.opName == InsCat1[5]:  # BREAK
+                self.disassemble_ins = act_BREAK(self.instr)
+            elif self.opName == InsCat1[6]:  # SW
+                self.disassemble_ins = act_SW(self.instr)
+            elif self.opName == InsCat1[7]:  # LW
+                self.disassemble_ins = act_LW(self.instr)
+            elif self.opName == InsCat1[8]:  # SLL
+                self.disassemble_ins = act_SLL(self.instr)
+            elif self.opName == InsCat1[9]:  # SRL
+                self.disassemble_ins = act_SRL(self.instr)
+            elif self.opName == InsCat1[10]:  # SRA
+                self.disassemble_ins = act_SRA(self.instr)
+            elif self.opName == InsCat1[11]:  # NOP
+                self.disassemble_ins = act_NOP(self.instr)
+        else:
+            if self.opName == InsCat2[0]:  # ADD 跳转指令
+                self.disassemble_ins = act_ADD(self.instr)
+            elif self.opName == InsCat2[1]:  # SUB 跳转到寄存器中的地址指令
+                self.disassemble_ins = act_SUB(self.instr)
+            elif self.opName == InsCat2[2]:  # 'MUL
+                self.disassemble_ins = act_MUL(self.instr)
+            elif self.opName == InsCat2[3]:  # 'AND
+                self.disassemble_ins = act_AND(self.instr)
+            elif self.opName == InsCat2[4]:  # 'OR
+                self.disassemble_ins = act_OR(self.instr)
+            elif self.opName == InsCat2[5]:  # XOR
+                self.disassemble_ins = act_XOR(self.instr)
+            elif self.opName == InsCat2[6]:  # NOR
+                self.disassemble_ins = act_NOR(self.instr)
+            elif self.opName == InsCat2[7]:  # SLT
+                self.disassemble_ins = act_SLT(self.instr)
+            elif self.opName == InsCat2[8]:  # ADDI
+                self.disassemble_ins = act_ADDI(self.instr)
+            elif self.opName == InsCat2[9]:  # ANDI
+                self.disassemble_ins = act_ANDI(self.instr)
+            elif self.opName == InsCat2[10]:  # ORI
+                self.disassemble_ins = act_ORI(self.instr)
+            elif self.opName == InsCat2[11]:  # XORI
+                self.disassemble_ins = act_XORI(self.instr)
+      #  file_handle.write("--------------------\nCycle:{}\t{}\t{}\n".format(Cycle, self.insAddr, self.disassemble_ins))
+     #   print("--------------------\nCycle:{} {} {}\n".format(Cycle, self.insAddr, self.disassemble_ins))
+       # printReg()
+        #printData()
+
+class InstructionStatus:
+    #生成
+    def __init__(self):
+        self.table=list()
+    def clear(self):
+        self.table=[]
+
+    def get_len(self):
+        return len(self.table)
+    #重置
+    def reset_instruction_status(self):
+        ins_len = self.get_len()
+        for ins_id in range(ins_len):
+            self.table[ins_id]['issue'] = False
+            self.table[ins_id]['read_operand'] = False
+            self.table[ins_id]['execution'] = False
+            self.table[ins_id]['write_result'] = False
+
+    # 向指令列表instructionList中添加一条指令,其中target为WR的目标寄存器
+    def add_instruction(self, instruction):
+        ins_id,op, i, j, k = re.split(' ', instruction)
+        instruction = {
+            "ins_id":ins_id,
+            "op": op,
+            "i": i,
+            "j": j,
+            "k": k,
+            "issue": False,
+            "read_operand": False,
+            "execution": False,
+            "write_result": False
+            }
+        # issue,readOperand,exeComplet,writeResult均初始化为0
+        self.table.append(instruction)
+     #获取指令执行状态
+
+#构建功能单元表
+class FunctionalUnitStatus:
+    def __init__(self):
+        self.table =list()
+    def printFunc(self):
+        for i in range(len(self.table)):
+            print(i,self.table[i]["ins_id"])
+    def judgeWAR(self, ins_id):#判断是否冲突，如果有冲突返回True
+        j=None
+        for i in range(len(self.table)):
+            if self.table[i]["ins_id"]==ins_id:
+                j=i
+        for i in range(len(self.table)):
+            if not(
+                    self.table[i]["Fj"]!=self.table[j]["Fi"]
+                    or self.table[i]["Rj"]==False
+                    and self.table[i]["Fk"]!=self.table[j]["Fi"]
+                    or self.table[i]["Rk"]==False):
+                return True
+        return False
+
+    def searchFi(self,rd):#搜索寄存器rd是否有指令待写入,有指令在写入返回ID和下标
+        for i in range(len(self.table)):
+            if self.table[i]["Fi"]==rd:
+                return self.table[i]["ins_id"],self.table[i]["Fi"]
+        return None
+    def searchFjk(self,rs,rt):#搜索寄存器rt/rk是否有指令待写入,有指令在写入返回True
+        for i in range(len(self.table)):
+            if self.table[i]["Fj"]==rs or self.table[i]["Fk"]==rs or self.table[i]["Fj"]==rt or self.table[i]["Fk"]==rt:
+                return True
+        return False
+
+#构建寄存器结果状态表
+class RegisterResultStatus:
+    def __init__(self):
+        self.register_count = 32
+        # 初始化20个寄存器
+        self.F = [None for i in range(self.register_count)]
+    #返回Result(FU)也就是ins_id
+    def searchR(self,r):
+        if r==None:
+            return None
+        return self.F[r]
+    #把要写入的目的寄存器填到结果状态表中
+    def issuebookkeeping(self,ins_id,rd):
+        if rd:#如果rd非空
+            self.F[rd]=ins_id
+
+class Scorebord:
+    def __init__(self):
+        self.insState=InstructionStatus()
+        self.func=FunctionalUnitStatus()
+        self.reg=RegisterResultStatus()
+        self.cycle=0
+
+    #判断是否WAW，在Issue步骤时判断
+    def judgeWAW(self,ins: instruction,i:int):
+        rd = ins.rd
+        if rd==None:
+            return False
+        if i>0:#with eearlier not-issued instructions如果指令不在第一个，那么要判断它和weight发射的指令是否存在WAW
+            for j in range(i):
+                if pre_issue_Entry[j].rd==ins.rd:
+                    return True
+
+        if self.reg.searchR(rd):#issued but not finished
+            return True
+        else:
+            return False
+
+    def judgeRAW(self,ins: instruction,i:int):#判断是否冲突，如果有冲突返回True
+
+        if i>0:
+            for j in range(i):
+                if pre_issue_Entry[j].rd==None:
+                    continue
+                if pre_issue_Entry[j].rd==ins.rs or pre_issue_Entry[j].rd==ins.rt:
+                    return True
+        fj = ins.rs
+        fk = ins.rt
+        qj = scoreboard.reg.searchR(fj)
+        qk = scoreboard.reg.searchR(fk)
+        if qj==ins.insAddr:
+            qj=None
+        if qk==ins.insAddr:
+            qk=None
+        rj = not qj
+        rk = not qk
+        if rj and rk:
+            return False
+        return True
+
+    def judgeWAR(self,ins: instruction,index:int):
+        if ins.rd==None:
+            return False
+        ins_id=ins.insAddr
+        if index>0:#with eearlier not-issued instructions如果指令不在第一个，那么要判断它和weight发射的指令是否存在WAR
+            #因为还没有发射，只要判断对于任何的FU，他们的源寄存器不等于ins的目的寄存器即可
+            for j in range(index):
+                if pre_issue_Entry[j].rs==ins.rd or pre_issue_Entry[j].rt==ins.rd:
+                    return True
+        for i in range(len(self.func.table)):
+            if i!=ins.insAddr and not (
+                    self.func.table[i]["Fj"] != ins.rd
+                    or self.func.table[i]["Rj"] == False
+                    and self.func.table[i]["Fk"] !=ins.rd
+                    or self.func.table[i]["Rk"] == False):
+
+                return True
+        return False
+
+    def issuebookkeeping(self,ins: instruction):
+        ins_id=ins.insAddr
+        busy=True
+        op=ins.opName
+        fi=ins.rd
+        fj=ins.rs
+        fk=ins.rt
+        qj=self.reg.searchR(fj)
+        qk=self.reg.searchR(fk)
+        rj=not qj
+        rk=not qk
+        function_unit = {
+            "ins_id": ins_id,
+            "ins": ins,
+            "Busy": busy,
+            "Op": op,
+            "Fi": fi,
+            "Fj": fj,
+            "Fk": fk,
+            "Qj": qj,
+            "Qk": qk,
+            "Rj": rj,
+            "Rk": rk
+        }
+        self.func.table.append(function_unit)
+        self.reg.issuebookkeeping(ins_id,fi)#写入
+    def deleteFuncState(self,ins_id):
+        for i in range(len(self.func.table)):
+            if self.func.table[i]["ins_id"]==ins_id:
+                self.func.table.remove(self.func.table[i])
+                break
+
+    def robookkeeping(self,ins: instruction):
+        ins_id=ins.insAddr
+        for i in range(len(self.func.table)):
+            if self.func.table[i]['ins_id']==ins_id:
+                self.func.table[i]["Rj"] = False
+                self.func.table[i]["Rk"] = False
+
+
+    def writebookkeeping(self,ins: instruction):
+        ins_id=ins.insAddr
+        rd=ins.rd
+        for i in range(len(self.func.table)):
+            if self.func.table[i]["ins_id"]==ins_id:
+                self.func.table[i]["Rj"]=True
+            if self.func.table[i]["ins_id"]==ins_id:
+                self.func.table[i]["Rk"]=True
+        if rd:
+            RegStateUpdate.append(rd)
+       # self.func.table[ins_id]["Busy"]=False#感觉改成del比较好
+    def RegUpdate(self):
+        if len(RegStateUpdate)!=0:
+            while(len(RegStateUpdate)!=0):
+                self.reg.F[RegStateUpdate[0]] = None
+                RegStateUpdate.remove(RegStateUpdate[0])
+
+
+scoreboard=Scorebord()
+
+def judgeBranchBreakNop(ins: instruction):
+    if (ins.opName != 'J' and ins.opName != 'JR' and ins.opName != 'BEQ'
+            and ins.opName != 'BLTZ' and ins.opName != 'BGTZ'
+            and ins.opName != 'BREAK' and ins.opName != 'NOP'):
+        return False
+    return True
+
+
+def ins_fetch():
+    global waiting_ins,executed_ins,pre_issue_Entry,PC,BreakFlag,pre_issue_count
+    pc_increment=0
+    first_ins=None
+    second_ins=None
+    id_ins = int((PC- 256) / 4)
+    if executed_ins !="":
+        executed_ins = ""
+    if waiting_ins != "":  # 如果Waiting Instruciton有分支指令在等待，那么不取
+        #判断waiting_ins是否可以执行
+        fj = waiting_ins.rs
+        fk = waiting_ins.rt
+        qj = scoreboard.reg.searchR(fj)
+        qk = scoreboard.reg.searchR(fk)
+        rj = not qj
+        rk = not qk
+
+        if   rj and rk:
+            executed_ins = waiting_ins
+            executed_ins.actInstr()
+            waiting_ins=""
+        return pc_increment
+    if pre_issue_count==4:  # 如果Pre-Issue Entry满了，不取指令
+        return 0
+    if pre_issue_count<4:  # 如果Pre-Issue Entry还有一两个空槽,那么取一两条指令
+        first_ins=instr[id_ins]#存第一个指令
+        second_ins =None
+        if pre_issue_count<= 2 and id_ins<len(instr)-1:
+           second_ins=instr[id_ins+1]#存第二个指令
+        branch_ins=""
+        branch_id=None
+        #如果第一条指令不是Branch，break，Nop指令，那么直接加入待执行队列
+        if (judgeBranchBreakNop(first_ins)==False):
+            pre_issue_Entry.append(first_ins)
+            pc_increment += 4
+            #如果第二条也不是Branch，break，Nop指令，那么直接加入待执行队列
+            if second_ins!=None:
+                if(judgeBranchBreakNop(second_ins)==False):
+                    pre_issue_Entry.append(second_ins)
+                    pc_increment += 4
+
+                else:#如果第二条是Branch，break，Nop指令，先存下来
+                    branch_ins=second_ins
+                    branch_id=id_ins+1
+                    #pc_increment += 4
+        else:#第一条指令就是Branch，break，Nop指令
+            branch_ins=first_ins
+            branch_id = id_ins
+        if branch_ins!="":#branch_ins非空  因为不放进scoreboard，所以不能在scoreboard查
+            fj=instr[branch_id].rs
+            fk=instr[branch_id].rt
+            qj = scoreboard.reg.searchR(fj)
+            qk = scoreboard.reg.searchR(fk)
+            rj=not qj
+            rk=not qk
+            if rj and rk:
+                executed_ins = branch_ins
+                executed_ins.actInstr()
+            else:
+                waiting_ins=branch_ins
+    pre_issue_count=len(pre_issue_Entry)
+        #对分支指令进行处理
+    if executed_ins!="":
+        pc_increment=0
+    return pc_increment
+def judgeWAWWAR(ins1:instruction,ins2:instruction):
+    rd=ins1.rd
+    rs=ins2.rs
+    rt=ins2.rt
+    if(rd!=rs and rd!=rt):
+        return
+def findInsinFuncState(ins_id):
+    for i in range(len(scoreboard.func.table)):
+        if scoreboard.func.table[i]["ins_id"]==ins_id:
+            return True
+    return False
+def Issue_unit():
+    global pre_issue_count
+    # 如果待执行队列为空，那么不执行，返回
+    if len(pre_issue_Entry) == 0:
+        return
+    firstIns=None
+    secondIns=None
+        # issue 第一条可行的指令
+    for i in range(len(pre_issue_Entry)):
+        ins = pre_issue_Entry[i]
+        # 先判断有没有WAW RAW
+        if (not scoreboard.judgeWAW(ins,i)) and (not scoreboard.judgeWAR(ins,i)) and (not findInsinFuncState(ins.insAddr)and(not scoreboard.judgeRAW(ins,i))):
+            scoreboard.issuebookkeeping(ins)
+            firstIns = ins
+            break
+        elif(findInsinFuncState(ins.insAddr))and(not scoreboard.judgeRAW(ins,i)):
+            firstIns = ins
+            break
+    #处理第一个指令
+    if firstIns==None:
+        return
+
+    #将第一条指令加入pre alu
+    if firstIns.ifLWSW==1:#代表是LWSW
+        #判断是否存在结构冲突
+        if len(pre_alu1_Entry)>1:
+            return
+        pre_alu1_Entry.append(firstIns)
+    else:#代表是其他指令
+        # 判断是否存在结构冲突
+
+        if len(pre_alu2_Entry)>1:
+            return
+        pre_alu2_Entry.append(firstIns)
+   # scoreboard.issuebookkeeping(firstIns)
+    pre_issue_Entry.remove(firstIns)
+     # issue 第二条指令
+    for i in range(len(pre_issue_Entry)):
+        ins = pre_issue_Entry[i]
+        if (not scoreboard.judgeWAW(ins,i))and (not scoreboard.judgeWAR(ins,i)) and (not findInsinFuncState(ins.insAddr)):
+
+            if not scoreboard.judgeRAW(ins,i):
+                scoreboard.issuebookkeeping(ins)
+                secondIns = ins
+            break
+        elif(findInsinFuncState(ins.insAddr))and(not scoreboard.judgeRAW(ins,i)):
+            secondIns = ins
+            break
+    #判断是不是同类型或者第二条为空
+    if secondIns==None or firstIns.ifLWSW==secondIns.ifLWSW :
+         return
+    #判断是不是存在WAW WAR
+
+    if secondIns.ifLWSW == 1:  # 代表是LWSW
+            # 判断是否存在结构冲突
+        if len(pre_alu1_Entry) > 1:
+            return
+        pre_alu1_Entry.append(secondIns)
+    else:
+        # 判断是否存在结构冲突
+        if len(pre_alu2_Entry) > 1:
+            return
+        pre_alu2_Entry.append(secondIns)
+    pre_issue_Entry.remove(secondIns)
+    pre_issue_count=len(pre_issue_Entry)
+    return
+
+def ALU():
+    global post_alu2_ins,pre_alu1_Entry,pre_mem_ins
+    #处理pre-ALU1
+    if len(pre_alu1_Entry)!=0:
+        ins=pre_alu1_Entry[0]
+        scoreboard.robookkeeping(ins)
+        pre_mem_ins=ins
+        pre_alu1_Entry.remove(ins)
+    # 处理pre-ALU2
+    if len(pre_alu2_Entry) >0:
+        ins = pre_alu2_Entry[0]
+        scoreboard.robookkeeping(ins)
+        post_alu2_ins=ins
+        pre_alu2_Entry.remove(ins)
+def Mem():
+    global pre_mem_ins,post_mem_ins
+    # 处理pre-ALU1
+    if pre_mem_ins != "":
+        ins = pre_mem_ins
+        post_mem_ins=ins
+        if post_mem_ins.opName=="SW":
+            post_mem_ins.actInstr()
+            scoreboard.writebookkeeping(post_mem_ins)
+            scoreboard.deleteFuncState(post_mem_ins.insAddr)
+            post_mem_ins=""
+        pre_mem_ins=""
+def WB():
+
+    #写回LW SW，从post—mem中取
+    global post_alu2_ins,post_mem_ins
+    scoreboard.RegUpdate()
+    if post_mem_ins!="":
+        post_mem_ins.actInstr()
+        scoreboard.writebookkeeping(post_mem_ins)
+        scoreboard.deleteFuncState(post_mem_ins.insAddr)
+        post_mem_ins=""
+
+    # 写回其他指令，从post—alu2中取
+    if post_alu2_ins!="":
+        post_alu2_ins.actInstr()
+        scoreboard.writebookkeeping(post_alu2_ins)
+        scoreboard.deleteFuncState(post_alu2_ins.insAddr)
+        post_alu2_ins=""
+
+# Process .txt instruction
+with open("sample.txt","r") as f:
+    instructions=f.readlines()
+ifBreaked=0 #还没到数据区
+DataAddr=0 #记录数据区开头地址
+#读取指令
+for i in range(0,len(instructions)):
+    instructions[i] = instructions[i].strip('\n')
+    if ifBreaked==1:#Break过了，进入数据区
+        Imm.append(com2dec(instructions[i]))  # 存立即数
+        ImmAddr.append(PC)#存立即数的地址
+        file_dissembly.write("{}\t{}\t{}\n".format(instructions[i],PC,str(com2dec(instructions[i]))))
+    else:
+        if instructions[i][2:6] == '0101':  # 判断BREAK
+            ifBreaked = 1#如果break了进入数据区
+            DataAddr=PC+4 #存储数据区开头地址
+        #没break就继续读指令
+        instr_tmp = instruction(instructions[i])
+        instr.append(instr_tmp)  # 存指令
+       # instr[i].display()
+    PC+=4#PC每次读完指令后加4
+
+def printPipeline():
+    file_handle.write("--------------------\nCycle:{}\n\n".format(Cycle))
+    file_handle.write("IF Unit:\n\tWaiting Instruction:")
+    if waiting_ins!="":
+        file_handle.write(" [{}]\n".format(waiting_ins.disassemble_ins))
+    else:
+        file_handle.write("\n")
+    file_handle.write("\tExecuted Instruction:")
+    if executed_ins!="":
+        file_handle.write(" [{}]\n".format(executed_ins.disassemble_ins))
+    else:
+        file_handle.write("\n")
+    file_handle.write("Pre-Issue Queue:\n")
+    for i in range(4):
+        file_handle.write("\tEntry {}:".format(i))
+        if i<len(pre_issue_Entry):
+            file_handle.write("[{}]\n".format(pre_issue_Entry[i].disassemble_ins))
+        else:
+            file_handle.write("\n")
+    file_handle.write("Pre-ALU1 Queue:\n")
+    for i in range(2):
+        file_handle.write("\tEntry {}:".format(i))
+        if i<len(pre_alu1_Entry):
+            file_handle.write("[{}]\n".format(pre_alu1_Entry[i].disassemble_ins))
+        else:
+            file_handle.write("\n")
+    file_handle.write("Pre-MEM Queue:")
+    if pre_mem_ins!="":
+        file_handle.write(" [{}]\n".format(pre_mem_ins.disassemble_ins))
+    else:
+        file_handle.write("\n")
+    file_handle.write("Post-MEM Queue:")
+    if post_mem_ins!="":
+        file_handle.write(" [{}]\n".format(post_mem_ins.disassemble_ins))
+    else:
+        file_handle.write("\n")
+    file_handle.write("Pre-ALU2 Queue:\n")
+    for i in range(2):
+        file_handle.write("\tEntry {}:".format(i))
+        if i<len(pre_alu2_Entry):
+            file_handle.write("[{}]\n".format(pre_alu2_Entry[i].disassemble_ins))
+        else:
+            file_handle.write("\n")
+    file_handle.write("Post-ALU2 Queue:")
+    if post_alu2_ins!="":
+        file_handle.write(" [{}]\n".format(post_alu2_ins.disassemble_ins))
+    else:
+        file_handle.write("\n")
+
+#下面是执行指令
+PC=256
+#获取指令数组下标
+id_ins=int((PC-256)/4)
+
+while(not BreakFlag):#不break就继续执行
+    Cycle+=1
+    #Instruction Fetch/Decode (IF):
+    WB()
+    Mem()
+    ALU()
+    Issue_unit()
+    PC=ins_fetch()+PC
+    #输出simulation
+    printPipeline()
+    printReg()
+    printData()
+    pre_issue_count=len(pre_issue_Entry)
+file_dissembly.close()
+file_handle.close()
+
